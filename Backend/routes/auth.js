@@ -7,15 +7,23 @@ require("dotenv").config();
 
 const JWT_SECRET = process.env.JWT_SECRET || "default_jwt_secret";
 
-// 회원가입 라우터
-router.post("/register", async (req, res) => {
-  const { name, email, school, grade, password, passwordConfirm } = req.body;
+// ✅ 프론트에 맞춘 필드명: username, confirmPassword
+router.post("/signup", async (req, res) => {
+  const { username, email, school, grade, password, confirmPassword } =
+    req.body;
 
-  if (!name || !email || !school || !grade || !password || !passwordConfirm) {
+  if (
+    !username ||
+    !email ||
+    !school ||
+    !grade ||
+    !password ||
+    !confirmPassword
+  ) {
     return res.status(400).json({ message: "모든 항목을 입력해주세요." });
   }
 
-  if (password !== passwordConfirm) {
+  if (password !== confirmPassword) {
     return res.status(400).json({ message: "비밀번호가 일치하지 않습니다." });
   }
 
@@ -31,7 +39,7 @@ router.post("/register", async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
     await db.execute(
       "INSERT INTO users (name, email, school, grade, password) VALUES (?, ?, ?, ?, ?)",
-      [name, email, school, grade, hashedPassword]
+      [username, email, school, grade, hashedPassword]
     );
 
     res.status(201).json({ message: "회원가입이 완료되었습니다." });
@@ -78,3 +86,7 @@ router.post("/login", async (req, res) => {
 });
 
 module.exports = router;
+
+router.get("/test", (req, res) => {
+  res.send("라우터 연결 정상 작동 중!");
+});
