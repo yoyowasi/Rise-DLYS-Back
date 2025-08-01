@@ -2,6 +2,7 @@ const express = require("express");
 const bodyParser = require("body-parser");
 const cors = require("cors");
 const authRoutes = require("./routes/auth");
+require("dotenv").config(); // dotenv 불러오기
 
 const app = express();
 const PORT = 3000;

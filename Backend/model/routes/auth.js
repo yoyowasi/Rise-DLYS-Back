@@ -3,8 +3,9 @@ const bcrypt = require("bcrypt");
 const db = require("../models/db");
 const router = express.Router();
 const jwt = require("jsonwebtoken");
+require("dotenv").config();
 
-const JWT_SECRET = "your_jwt_secret_key";
+const JWT_SECRET = process.env.JWT_SECRET || "default_jwt_secret";
 
 // 회원가입 라우터
 router.post("/register", async (req, res) => {
