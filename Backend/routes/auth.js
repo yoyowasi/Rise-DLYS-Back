@@ -86,7 +86,3 @@ router.post("/login", async (req, res) => {
 });
 
 module.exports = router;
-
-router.get("/test", (req, res) => {
-  res.send("라우터 연결 정상 작동 중!");
-});
