@@ -1,6 +1,6 @@
 // 📁 server.js
 const app = require("./app"); // ← app.js 가져오기
-require("dotenv").config();
+
 
 const PORT = process.env.PORT || 4000;
 

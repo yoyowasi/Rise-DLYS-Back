@@ -1,4 +1,4 @@
-require("dotenv").config();
+
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 // apiKey를 환경 변수에서 가져옵니다.
