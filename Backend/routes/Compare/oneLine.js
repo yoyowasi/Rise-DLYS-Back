@@ -21,7 +21,7 @@ router.get("/", async (req, res) => {
 });
 
 // ✅ POST: AI와 비교
-router.post("/", async (req, res) => {
+router.post("/submit", async (req, res) => {
   const { newsId, userSummary } = req.body;
   if (!newsId || !userSummary)
     return res
