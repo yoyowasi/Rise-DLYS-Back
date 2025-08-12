@@ -3,106 +3,165 @@ const express = require("express");
 const router = express.Router();
 const db = require("../../models/db");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
-const makePrompt = require("../../prompts/oneLine");
+const makeComparisonPrompt = require("../../prompts/oneLine");
+const makeProblemPrompt = require("../../prompts/problemSummary"); // 문제 생성용 프롬프트 추가
 const { authenticateToken } = require("../../middleware/auth");
 require("dotenv").config();
 
-// ✅ GET: 무작위 뉴스 (성능 개선 버전)
+const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
+const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+
+// AI 응답 파싱 헬퍼 함수 (비교 결과용)
+const parseComparisonResponse = (text) => {
+  try {
+    const cleanedText = text
+      .replace(/---/g, "")
+      .replace(/```json/g, "")
+      .replace(/```/g, "")
+      .trim();
+
+    const getSection = (key) => {
+      const regex = new RegExp(`\\[${key}\\]([\\s\\S]*?)(?=\\[|$)`, "i");
+      const match = cleanedText.match(regex);
+      return match ? match[1].trim() : "";
+    };
+
+    const aiSummary = getSection("AI 한 줄 요약");
+    const comparisonBlock = getSection("비교 결과");
+
+    const getComparisonDetail = (key) => {
+      if (!comparisonBlock) return "분석 실패";
+      const regex = new RegExp(`- ${key}:\\s*(.*)`, "i");
+      const match = comparisonBlock.match(regex);
+      return match ? match[1].trim() : "분석 실패";
+    };
+
+    const scoreText = getComparisonDetail("점수");
+    const score = parseInt(scoreText, 10) || 0;
+
+    return {
+      aiSummary,
+      similarity: getComparisonDetail("유사도"),
+      score,
+      difference: getComparisonDetail("차이점"),
+      suggestion: getComparisonDetail("제안"),
+    };
+  } catch (err) {
+    console.error("AI 응답 파싱 실패:", err);
+    return {
+      aiSummary: "",
+      similarity: "분석 실패",
+      score: 0,
+      difference: "분석 실패",
+      suggestion: "분석 실패",
+    };
+  }
+};
+
+// 재시도 로직 헬퍼 함수
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+async function generateContentWithRetry(prompt, maxRetries = 3) {
+  let lastError;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const result = await model.generateContent(prompt);
+      if (!result || !result.response) {
+        throw new Error("AI_NO_RESPONSE_IN_RESULT");
+      }
+      return result;
+    } catch (err) {
+      lastError = err;
+      console.error(`[Gemini API] Attempt ${attempt} failed:`, err.message);
+      if (err.status === 503 && attempt < maxRetries) {
+        await delay(1000 * attempt);
+      } else {
+        break;
+      }
+    }
+  }
+  throw lastError;
+}
+
+// GET /: AI가 요약한 '문제'를 생성해서 내려주는 API
 router.get("/", async (req, res) => {
   try {
-    // 1. 전체 뉴스 기사 수를 먼저 효율적으로 계산합니다.
-    const [[{ count }]] = await db.query("SELECT COUNT(*) as count FROM news");
-
-    if (count === 0) {
+    const [[{ count }]] = await db.query(
+      "SELECT COUNT(*) as count FROM news"
+    );
+    if (count === 0)
       return res.status(404).json({ error: "뉴스가 없습니다." });
-    }
 
-    // 2. 0부터 (전체 수 - 1) 사이의 무작위 오프셋을 생성합니다.
     const randomOffset = Math.floor(Math.random() * count);
-
-    // 3. 해당 오프셋의 뉴스 기사 1개를 즉시 가져옵니다. (ORDER BY RAND() 대신 사용)
     const [rows] = await db.query(
       "SELECT id, title, content FROM news LIMIT 1 OFFSET ?",
       [randomOffset]
     );
+    const originalNews = rows[0];
+    if (!originalNews)
+      return res.status(404).json({ error: "뉴스를 찾을 수 없습니다." });
 
-    const news = rows[0];
-    if (!news) {
-        // 이 경우는 거의 발생하지 않지만, 만약을 대비한 방어 코드입니다.
-        return res.status(404).json({ error: "뉴스를 찾을 수 없습니다." });
+    const problemPrompt = makeProblemPrompt({
+      title: originalNews.title,
+      content: originalNews.content,
+    });
+    const result = await generateContentWithRetry(problemPrompt);
+    const summarizedContent = (await result.response.text()).trim();
+
+    if (!summarizedContent) {
+      return res
+        .status(502)
+        .json({ error: "AI가 문제 요약 생성에 실패했습니다." });
     }
 
-    res.json({ id: news.id, title: news.title, content: news.content });
+    res.json({
+      id: originalNews.id,
+      title: originalNews.title,
+      content: summarizedContent,
+    });
   } catch (error) {
-    console.error("뉴스 불러오기 실패:", error);
-    res.status(500).json({ error: "뉴스 불러오는 중 오류 발생" });
+    console.error("문제 생성 실패:", error);
+    res.status(500).json({ error: "문제 생성 중 오류 발생" });
   }
 });
 
-// ✅ POST: AI와 비교 및 점수 저장
+// POST /submit: 사용자의 답안을 채점하는 API
 router.post("/submit", authenticateToken, async (req, res) => {
   const userId = req.user.uid;
-
   try {
     const { newsId, userSummary } = req.body;
-    
-    // 입력 검증
-    if (!newsId || !userSummary) {
-      return res.status(400).json({ 
-        error: "newsId와 userSummary는 필수입니다.",
-        code: "MISSING_REQUIRED_FIELDS"
-      });
-    }
+    if (!newsId || !userSummary)
+      return res
+        .status(400)
+        .json({ error: "newsId와 userSummary는 필수입니다." });
 
-    if (typeof userSummary !== 'string' || userSummary.trim().length === 0) {
-      return res.status(400).json({ 
-        error: "userSummary는 비어있지 않은 문자열이어야 합니다.",
-        code: "INVALID_USER_SUMMARY"
-      });
-    }
+    const [newsRows] = await db.query(
+      "SELECT * FROM news WHERE id = ?",
+      [newsId]
+    );
+    const originalNews = newsRows[0];
+    if (!originalNews)
+      return res.status(404).json({ error: "해당 뉴스가 없습니다." });
 
-    // 뉴스 조회
-    const [newsRows] = await db.query("SELECT * FROM news WHERE id = ?", [newsId]);
-    const news = newsRows[0];
-    
-    if (!news) {
-      return res.status(404).json({ 
-        error: "해당 뉴스가 없습니다.",
-        code: "NEWS_NOT_FOUND"
-      });
-    }
+    const comparisonPrompt = makeComparisonPrompt({
+      title: originalNews.title,
+      content: originalNews.content,
+      userSummary,
+    });
 
-    // AI 요약 생성
-    const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-    const prompt = makePrompt({ title: news.title, content: news.content, userSummary: userSummary.trim() });
-
-    const result = await model.generateContent(prompt);
-    const response = result.response;
-    
-    if (!response) {
-      throw new Error("AI 응답을 받을 수 없습니다.");
-    }
-
-    const aiSummary = (await response.text()).trim();
-    
-    if (!aiSummary) {
+    const result = await generateContentWithRetry(comparisonPrompt);
+    const aiResponseText = (await result.response.text()).trim();
+    if (!aiResponseText)
       throw new Error("AI가 빈 응답을 반환했습니다.");
-    }
 
-    // 점수 계산
-    const score = compareSummaries(aiSummary, userSummary.trim());
-    const feedback =
-      score >= 80
-        ? "훌륭해요! 핵심 내용을 잘 요약했어요."
-        : score >= 50
-        ? "나쁘지 않지만, 더 핵심 문장을 잡아보세요."
-        : "AI 요약과 차이가 커요. 다시 도전해보세요!";
+    const parsedData = parseComparisonResponse(aiResponseText);
+    const { score } = parsedData;
 
-    // 점수 업데이트
-    const [scoreRows] = await db.query("SELECT * FROM uscore WHERE uid = ?", [userId]);
+    const [scoreRows] = await db.query(
+      "SELECT * FROM uscore WHERE uid = ?",
+      [userId]
+    );
     const userScore = scoreRows[0];
-    
+
     if (userScore) {
       const newTotalScore = userScore.total_score + score;
       const newGamesPlayed = userScore.games_played + 1;
@@ -118,49 +177,17 @@ router.post("/submit", authenticateToken, async (req, res) => {
       );
     }
 
-    res.json({ 
-      aiSummary, 
-      userSummary: userSummary.trim(), 
-      score, 
-      feedback,
-      success: true
-    });
-
+    res.json({ userSummary, ...parsedData, success: true });
   } catch (error) {
     console.error("요약 비교 및 점수 저장 실패:", error);
-    
-    // Google API 에러 처리
-    if (error.message?.includes('API key')) {
-      return res.status(500).json({ 
-        error: "AI 서비스 인증 오류입니다.",
-        code: "AI_AUTH_ERROR"
+    if (error && error.status === 503) {
+      return res.status(503).json({
+        error: "AI 서비스가 현재 응답할 수 없습니다. 잠시 후 다시 시도해 주세요.",
+        code: "AI_SERVICE_UNAVAILABLE",
       });
     }
-    
-    if (error.message?.includes('quota') || error.message?.includes('limit')) {
-      return res.status(429).json({ 
-        error: "AI 서비스 사용량 한도에 도달했습니다.",
-        code: "AI_QUOTA_EXCEEDED"
-      });
-    }
-
-    res.status(500).json({ 
-      error: "처리 중 오류가 발생했습니다.",
-      code: "INTERNAL_ERROR",
-      details: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
+    res.status(500).json({ error: "처리 중 오류가 발생했습니다." });
   }
 });
-
-// ✅ 간단한 유사도 비교
-function compareSummaries(ai, user) {
-  if (!ai || !user) return 0;
-  const aiWords = ai.toLowerCase().split(/\s+/);
-  const userWords = user.toLowerCase().split(/\s+/);
-  const aiSet = new Set(aiWords);
-  const userSet = new Set(userWords);
-  const common = [...aiSet].filter((w) => userSet.has(w));
-  return Math.round((common.length / aiSet.size) * 100);
-}
 
 module.exports = router;

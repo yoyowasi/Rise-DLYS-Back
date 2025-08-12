@@ -59,3 +59,4 @@ npm run dev
 - Google Generative AI (Gemini)
 - CORS
 - express-session
+pm2 start npm --name "rise-server" --cwd ./Backend -- start

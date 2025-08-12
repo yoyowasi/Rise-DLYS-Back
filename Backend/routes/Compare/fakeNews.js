@@ -9,107 +9,101 @@ const { authenticateToken, JWT_SECRET } = require("../../middleware/auth");
 require("dotenv").config();
 
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
-const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+const TOTAL_QUESTIONS = 5; // 한 게임에 생성할 문제 수를 상수로 정의
 
-// GET /: 가짜뉴스 문제 생성 (DB 조회 최적화 및 JWT 방식 적용)
+// 잠시 대기하는 함수
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// AI 모델 호출을 재시도 로직과 함께 래핑하는 함수
+async function generateContentWithRetry(prompt, maxRetries = 3) {
+  let attempt = 0;
+  while (attempt < maxRetries) {
+    try {
+      const result = await model.generateContent(prompt);
+      return result; // 성공 시 결과 반환
+    } catch (err) {
+      attempt++;
+      console.error(`[FakeNews Gemini] Attempt ${attempt} failed:`, err.message);
+      // 503 에러이고 아직 재시도 횟수가 남았을 때만 대기 후 재시도
+      if (err.status === 503 && attempt < maxRetries) {
+        await delay(1000 * attempt); // 1초, 2초 간격으로 대기
+      } else {
+        // 다른 종류의 에러이거나 모든 재시도 실패 시 에러 발생
+        throw err;
+      }
+    }
+  }
+}
+
+
+// GET /: 가짜뉴스 문제 생성 로직을 5개씩 만들도록 수정
 router.get("/", async (req, res) => {
   try {
-    // 1. 전체 뉴스 기사 수 계산 (성능 개선)
-    const [[{ count }]] = await db.query("SELECT COUNT(*) as count FROM news");
-    if (count === 0) {
-      return res.status(404).json({ 
-        error: "뉴스가 없습니다.",
-        code: "NO_NEWS_AVAILABLE"
-      });
-    }
-
-    // 2. 무작위 오프셋 생성 및 뉴스 1건 조회 (성능 개선)
-    const randomOffset = Math.floor(Math.random() * count);
-    const [rows] = await db.query("SELECT content FROM news LIMIT 1 OFFSET ?", [randomOffset]);
-    const realNews = rows?.[0]?.content;
+    // 1. DB에서 무작위 뉴스 5개 조회
+    const [rows] = await db.query(`SELECT content FROM news ORDER BY RAND() LIMIT ${TOTAL_QUESTIONS}`);
     
-    if (!realNews) {
+    if (!rows || rows.length < TOTAL_QUESTIONS) {
       return res.status(404).json({ 
-        error: "뉴스를 찾을 수 없습니다.",
-        code: "NEWS_NOT_FOUND"
+        error: "문제를 만들기에 충분한 뉴스가 없습니다.",
+        code: "NOT_ENOUGH_NEWS"
       });
     }
 
-    // 3. 프롬프트 생성 & Gemini 호출
-    const prompt = fakeNewsPrompt(realNews);
-    const result = await model.generateContent(prompt);
-    const response = result?.response;
-    
-    if (!response) {
-      console.error("[FakeNews Error] No response from Gemini API");
-      return res.status(502).json({ 
-        error: "AI 서비스에서 응답을 받을 수 없습니다.",
-        code: "AI_NO_RESPONSE"
-      });
-    }
+    // 2. 5개의 뉴스에 대해 병렬로 AI 호출하여 문제 생성
+    const questionPromises = rows.map(async (row) => {
+      const realNews = row.content;
+      const prompt = fakeNewsPrompt(realNews);
+      
+      const result = await generateContentWithRetry(prompt); // 재시도 로직이 포함된 함수 사용
+      const response = result?.response;
 
-    const responseText = response?.text?.() || "";
+      if (!response) {
+        throw new Error("AI_NO_RESPONSE");
+      }
+      
+      const responseText = response.text() || "";
+      if (!responseText) {
+        throw new Error("AI_EMPTY_RESPONSE");
+      }
+      
+      const cleaned = responseText.replace(/```json\s*|\s*```/gi, "").trim();
+      const parsed = JSON.parse(cleaned);
+      
+      const article = String(parsed?.article || "").trim();
+      const isFake = Boolean(parsed?.isFake);
 
-    if (!responseText) {
-      console.error("[FakeNews Error] Gemini API returned empty/blocked response.", response);
-      return res.status(502).json({ 
-        error: "AI 응답이 비어있거나 차단되었습니다.",
-        code: "AI_EMPTY_RESPONSE"
-      });
-    }
+      if (!article) {
+        throw new Error("AI_INVALID_ARTICLE");
+      }
 
-    // 4. JSON 파싱
-    const cleaned = responseText.replace(/```json\s*|\s*```/gi, "").trim();
-    let parsed;
-    try {
-      parsed = JSON.parse(cleaned);
-    } catch (parseError) {
-      console.error("[FakeNews Parse Error] raw:", responseText, "cleaned:", cleaned, "error:", parseError);
-      return res.status(502).json({ 
-        error: "AI 응답 파싱 실패",
-        code: "AI_PARSE_ERROR"
-      });
-    }
-
-    const article = String(parsed?.article || "").trim();
-    const isFake = Boolean(parsed?.isFake);
-
-    if (!article) {
-      return res.status(502).json({ 
-        error: "AI가 유효한 기사 텍스트를 생성하지 못했습니다.",
-        code: "AI_INVALID_ARTICLE"
-      });
-    }
-
-    // 5. 정답을 JWT에 담아 토큰으로 생성 (임시 저장소 대신 사용)
-    const questionToken = jwt.sign({ isFakeAnswer: isFake }, JWT_SECRET, { expiresIn: '10m' });
-
-    // 6. 클라이언트로 문제 전송
-    res.json({
-      questionToken,
-      article,
-      options: ["가짜 뉴스", "진짜 뉴스"], // 0: 가짜, 1: 진짜
-      success: true
+      // 각 문제에 대한 개별 토큰 생성
+      const questionToken = jwt.sign({ isFakeAnswer: isFake }, JWT_SECRET, { expiresIn: '10m' });
+      
+      return {
+        questionToken,
+        article,
+        options: ["가짜 뉴스", "진짜 뉴스"]
+      };
     });
+
+    // 모든 비동기 작업이 완료될 때까지 기다림
+    const questions = await Promise.all(questionPromises);
+
+    // 3. 클라이언트로 5개의 문제 세트 전송
+    res.json(questions);
 
   } catch (err) {
     console.error("[FakeNews Error]", err);
-    
-    // Google API 에러 처리
-    if (err.message?.includes('API key')) {
-      return res.status(500).json({ 
-        error: "AI 서비스 인증 오류입니다.",
-        code: "AI_AUTH_ERROR"
-      });
-    }
-    
-    if (err.message?.includes('quota') || err.message?.includes('limit')) {
-      return res.status(429).json({ 
-        error: "AI 서비스 사용량 한도에 도달했습니다.",
-        code: "AI_QUOTA_EXCEEDED"
-      });
-    }
 
+    // 에러 코드에 따른 분기 처리
+    if (err.message === 'AI_NO_RESPONSE') {
+      return res.status(502).json({ error: "AI 서비스에서 응답을 받을 수 없습니다.", code: "AI_NO_RESPONSE" });
+    }
+    if (err.message === 'AI_EMPTY_RESPONSE') {
+        return res.status(502).json({ error: "AI 응답이 비어있거나 차단되었습니다.", code: "AI_EMPTY_RESPONSE" });
+    }
+    // ... 기타 에러 처리
     res.status(500).json({ 
       error: "서버 오류가 발생했습니다.",
       code: "INTERNAL_ERROR",
@@ -117,6 +111,7 @@ router.get("/", async (req, res) => {
     });
   }
 });
+
 
 // POST /submit: 정답 제출 (점수 기록 기능 추가)
 router.post("/submit", authenticateToken, async (req, res) => {
