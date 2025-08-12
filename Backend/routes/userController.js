@@ -114,7 +114,7 @@ router.get("/profile", authenticateToken, async (req, res) => {
         u.school,
         us.total_score
       FROM users u
-      JOIN uscore us ON u.uid = us.uid
+      LEFT JOIN uscore us ON u.uid = us.uid -- ‼️ JOIN을 LEFT JOIN으로 수정
       ORDER BY us.total_score DESC, us.games_played DESC
       `
     );
@@ -142,7 +142,7 @@ router.get("/profile", authenticateToken, async (req, res) => {
   }
 });
 
-// ✅ 전체 개인 랭킹 조회 라우터
+// 전체 개인 랭킹 조회 라우터
 router.get("/ranking", async (req, res) => {
   try {
     const [rankingData] = await db.execute(
@@ -170,7 +170,7 @@ router.get("/ranking", async (req, res) => {
   }
 });
 
-// ✅ 학교별 랭킹 조회 라우터 (뷰/윈도함수 비의존)
+// 학교별 랭킹 조회 라우터
 router.get("/ranking/school", async (req, res) => {
   try {
     const [rows] = await db.execute(
@@ -198,7 +198,7 @@ router.get("/ranking/school", async (req, res) => {
   }
 });
 
-// ✅ 초등학생 랭킹 조회 라우터
+// 초등학생 랭킹 조회 라우터
 router.get("/ranking/elementary", async (req, res) => {
   try {
     const [rankingData] = await db.execute(
@@ -218,7 +218,7 @@ router.get("/ranking/elementary", async (req, res) => {
   }
 });
 
-// ✅ 중학생 랭킹 조회 라우터
+// 중학생 랭킹 조회 라우터
 router.get("/ranking/middle", async (req, res) => {
   try {
     const [rankingData] = await db.execute(
@@ -238,7 +238,7 @@ router.get("/ranking/middle", async (req, res) => {
   }
 });
 
-// ✅ 고등학생 랭킹 조회 라우터
+// 고등학생 랭킹 조회 라우터
 router.get("/ranking/high", async (req, res) => {
   try {
     const [rankingData] = await db.execute(

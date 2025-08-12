@@ -72,7 +72,7 @@ router.post("/signup", async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
 
     await db.execute(
-      "INSERT INTO users (name, email, school, grade, pwd, location) VALUES (?, ?, ?, ?, ?, ?)",
+      "INSERT INTO users (name, email, school, grade, password, location) VALUES (?, ?, ?, ?, ?, ?)",
       [username, email, school, parsedGrade, hashedPassword, location]
     );
 
@@ -110,7 +110,7 @@ router.post("/login", async (req, res) => {
     const user = users[0];
     console.log("✅ 데이터베이스에서 찾은 사용자:", user); // ✅ 사용자 정보 확인
 
-    const isMatch = await bcrypt.compare(password, user.pwd);
+    const isMatch = await bcrypt.compare(password, user.password);
 
     if (!isMatch) {
       console.log(
