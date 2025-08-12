@@ -2,28 +2,8 @@
 const express = require("express");
 const db = require("../models/db");
 const router = express.Router();
-const jwt = require("jsonwebtoken");
+const { authenticateToken } = require("../middleware/auth");
 require("dotenv").config();
-
-const JWT_SECRET = process.env.JWT_SECRET || "default_jwt_secret";
-
-// JWT 토큰을 검증하는 미들웨어
-const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers["authorization"];
-  const token = authHeader && authHeader.split(" ")[1];
-
-  if (token == null) {
-    return res.status(401).json({ message: "인증 토큰이 누락되었습니다." });
-  }
-
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) {
-      return res.status(403).json({ message: "유효하지 않은 토큰입니다." });
-    }
-    req.user = user;
-    next();
-  });
-};
 
 // 사용자 프로필 업데이트 라우터
 router.put("/profile", authenticateToken, async (req, res) => {
@@ -43,10 +23,10 @@ router.put("/profile", authenticateToken, async (req, res) => {
   }
 
   const parsedGrade = parseInt(grade, 10);
-  if (isNaN(parsedGrade) || parsedGrade < 1 || parsedGrade > 12) {
+  if (isNaN(parsedGrade) || parsedGrade < 1 || parsedGrade > 6) {
     return res
       .status(400)
-      .json({ message: "학년은 1부터 12 사이의 숫자여야 합니다." });
+      .json({ message: "학년은 1부터 6 사이의 숫자여야 합니다." });
   }
 
   try {

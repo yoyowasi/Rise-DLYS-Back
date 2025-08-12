@@ -1,5 +1,4 @@
 const express = require("express");
-const bodyParser = require("body-parser");
 const cors = require("cors");
 const session = require("express-session"); // express-session 모듈 불러오기
 const authRoutes = require("./routes/auth");
@@ -7,6 +6,7 @@ const oneLineRoutes = require("./routes/Compare/oneLine");
 const biasRoutes = require("./routes/Compare/biasDetect");
 const fakeNewsRoutes = require("./routes/Compare/fakeNews");
 const userRoutes = require("./routes/userController");
+const { errorHandler, notFoundHandler } = require("./middleware/errorHandler");
 
 require("dotenv").config();
 
@@ -34,8 +34,9 @@ app.use(
   })
 );
 
-// body-parser 미들웨어 적용
-app.use(bodyParser.json());
+// Express 내장 JSON 파서 사용 (Express 4.16.0+)
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 // 라우터 설정
 app.use("/api/auth", authRoutes);
@@ -48,5 +49,11 @@ app.use("/api/fake-news", fakeNewsRoutes);
 app.get("/", (req, res) => {
   res.send("✅ 백엔드 서버 작동 중 (from app.js)");
 });
+
+// 404 에러 핸들러 (모든 라우트 다음에 위치)
+app.use(notFoundHandler);
+
+// 전역 에러 핸들러 (가장 마지막에 위치)
+app.use(errorHandler);
 
 module.exports = app;
