@@ -7,6 +7,7 @@ const biasRoutes = require("./routes/Compare/biasDetect");
 const fakeNewsRoutes = require("./routes/Compare/fakeNews");
 const userRoutes = require("./routes/userController");
 const { errorHandler, notFoundHandler } = require("./middleware/errorHandler");
+const badgeRoutes = require('./routes/badges');
 
 require("dotenv").config();
 
@@ -44,6 +45,7 @@ app.use("/api/users", userRoutes);
 app.use("/api/compare-random", oneLineRoutes);
 app.use("/api/compare-biasDetect", biasRoutes);
 app.use("/api/fake-news", fakeNewsRoutes);
+app.use('/api/badges', badgeRoutes);
 
 // 루트 경로 핸들러
 app.get("/", (req, res) => {

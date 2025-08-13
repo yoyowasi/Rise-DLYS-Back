@@ -1,17 +1,16 @@
-// routes/compare/oneLine.js
 const express = require("express");
 const router = express.Router();
 const db = require("../../models/db");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const makeComparisonPrompt = require("../../prompts/oneLine");
-const makeProblemPrompt = require("../../prompts/problemSummary"); // 문제 생성용 프롬프트 추가
+const makeProblemPrompt = require("../../prompts/problemSummary");
 const { authenticateToken } = require("../../middleware/auth");
+const { checkAndAwardPostGameBadges } = require('../../utils/badgeUtils');
 require("dotenv").config();
 
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
 const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
-// AI 응답 파싱 헬퍼 함수 (비교 결과용)
 const parseComparisonResponse = (text) => {
   try {
     const cleanedText = text
@@ -58,7 +57,6 @@ const parseComparisonResponse = (text) => {
   }
 };
 
-// 재시도 로직 헬퍼 함수
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function generateContentWithRetry(prompt, maxRetries = 3) {
   let lastError;
@@ -82,7 +80,6 @@ async function generateContentWithRetry(prompt, maxRetries = 3) {
   throw lastError;
 }
 
-// GET /: AI가 요약한 '문제'를 생성해서 내려주는 API
 router.get("/", async (req, res) => {
   try {
     const [[{ count }]] = await db.query(
@@ -124,23 +121,25 @@ router.get("/", async (req, res) => {
   }
 });
 
-// POST /submit: 사용자의 답안을 채점하는 API
 router.post("/submit", authenticateToken, async (req, res) => {
   const userId = req.user.uid;
-  try {
-    const { newsId, userSummary } = req.body;
-    if (!newsId || !userSummary)
-      return res
-        .status(400)
-        .json({ error: "newsId와 userSummary는 필수입니다." });
+  const connection = await db.getConnection();
 
-    const [newsRows] = await db.query(
-      "SELECT * FROM news WHERE id = ?",
-      [newsId]
-    );
+  try {
+    await connection.beginTransaction();
+
+    const { newsId, userSummary } = req.body;
+    if (!newsId || !userSummary) {
+      await connection.rollback();
+      return res.status(400).json({ error: "newsId와 userSummary는 필수입니다." });
+    }
+
+    const [newsRows] = await connection.query("SELECT * FROM news WHERE id = ?", [newsId]);
     const originalNews = newsRows[0];
-    if (!originalNews)
+    if (!originalNews) {
+      await connection.rollback();
       return res.status(404).json({ error: "해당 뉴스가 없습니다." });
+    }
 
     const comparisonPrompt = makeComparisonPrompt({
       title: originalNews.title,
@@ -150,35 +149,29 @@ router.post("/submit", authenticateToken, async (req, res) => {
 
     const result = await generateContentWithRetry(comparisonPrompt);
     const aiResponseText = (await result.response.text()).trim();
-    if (!aiResponseText)
-      throw new Error("AI가 빈 응답을 반환했습니다.");
+    if (!aiResponseText) throw new Error("AI가 빈 응답을 반환했습니다.");
 
     const parsedData = parseComparisonResponse(aiResponseText);
     const { score } = parsedData;
 
-    const [scoreRows] = await db.query(
-      "SELECT * FROM uscore WHERE uid = ?",
-      [userId]
+    await connection.query(
+      `INSERT INTO uscore (uid, total_score, games_played, accuracy) 
+       VALUES (?, ?, 1, ?)
+       ON DUPLICATE KEY UPDATE 
+       total_score = total_score + VALUES(total_score), 
+       games_played = games_played + 1,
+       accuracy = total_score / games_played`,
+      [userId, score, score]
     );
-    const userScore = scoreRows[0];
+    
+    await checkAndAwardPostGameBadges(connection, userId);
 
-    if (userScore) {
-      const newTotalScore = userScore.total_score + score;
-      const newGamesPlayed = userScore.games_played + 1;
-      const newAccuracy = newTotalScore / newGamesPlayed;
-      await db.query(
-        "UPDATE uscore SET total_score = ?, games_played = ?, accuracy = ? WHERE uid = ?",
-        [newTotalScore, newGamesPlayed, newAccuracy, userId]
-      );
-    } else {
-      await db.query(
-        "INSERT INTO uscore (uid, total_score, games_played, accuracy) VALUES (?, ?, ?, ?)",
-        [userId, score, 1, score]
-      );
-    }
+    await connection.commit();
 
     res.json({ userSummary, ...parsedData, success: true });
+
   } catch (error) {
+    await connection.rollback();
     console.error("요약 비교 및 점수 저장 실패:", error);
     if (error && error.status === 503) {
       return res.status(503).json({
@@ -187,6 +180,8 @@ router.post("/submit", authenticateToken, async (req, res) => {
       });
     }
     res.status(500).json({ error: "처리 중 오류가 발생했습니다." });
+  } finally {
+    connection.release();
   }
 });
 
